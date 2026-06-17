@@ -1,0 +1,212 @@
+version: '3.8'
+
+# ─── Giải thích nhanh ────────────────────────────────────────────────────────
+# File này dành cho môi trường production (EC2, server).
+# Khác với docker-compose.yml (dev):
+#   - Không có UI tools (kafka-ui, redis-commander)
+#   - Không expose port nội bộ ra ngoài (postgres, redis, kafka)
+#   - Tất cả service nói chuyện qua tên service trong Docker network "backend"
+#   - Secrets đọc từ file .env (không hardcode)
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ═══════════════════════════════════════════════════════
+  # INFRASTRUCTURE
+  # ═══════════════════════════════════════════════════════
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-databases.sql:/docker-entrypoint-initdb.d/init-databases.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+    restart: unless-stopped
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # Trong prod chỉ cần PLAINTEXT (nội bộ) — bỏ EXTERNAL vì không cần truy cập từ host
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - backend
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    volumes:
+      - redis_data:/data
+    networks:
+      - backend
+    restart: unless-stopped
+
+  # ═══════════════════════════════════════════════════════
+  # SPRING BOOT SERVICES — khởi động theo thứ tự
+  # eureka → config → (gateway, identity, product, order, inventory)
+  # ═══════════════════════════════════════════════════════
+
+  eureka-service:
+    build:
+      context: .
+      dockerfile: eureka-service/Dockerfile
+    container_name: eureka-service
+    environment:
+      # Eureka cần biết hostname của chính nó để các service khác resolve được
+      EUREKA_INSTANCE_HOSTNAME: eureka-service
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka:eureka123@eureka-service:8761/eureka/
+    ports:
+      - "8761:8761"
+    networks:
+      - backend
+    restart: unless-stopped
+
+  config-service:
+    build:
+      context: .
+      dockerfile: config-service/Dockerfile
+    container_name: config-service
+    environment:
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka:eureka123@eureka-service:8761/eureka/
+    depends_on:
+      - eureka-service
+    networks:
+      - backend
+    restart: unless-stopped
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: api-gateway/Dockerfile
+    container_name: api-gateway
+    environment:
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka:eureka123@eureka-service:8761/eureka/
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+    ports:
+      - "8080:8080"
+    depends_on:
+      - eureka-service
+    networks:
+      - backend
+    restart: unless-stopped
+
+  identity-service:
+    build:
+      context: .
+      dockerfile: identity-service/Dockerfile
+    container_name: identity-service
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/identity_db
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka:eureka123@eureka-service:8761/eureka/
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ACCESS_TOKEN_EXPIRATION: ${JWT_ACCESS_TOKEN_EXPIRATION}
+      JWT_REFRESH_TOKEN_EXPIRATION: ${JWT_REFRESH_TOKEN_EXPIRATION}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      eureka-service:
+        condition: service_started
+    networks:
+      - backend
+    restart: unless-stopped
+
+  product-service:
+    build:
+      context: .
+      dockerfile: product-service/Dockerfile
+    container_name: product-service
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/product_db
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka:eureka123@eureka-service:8761/eureka/
+    depends_on:
+      postgres:
+        condition: service_healthy
+      eureka-service:
+        condition: service_started
+    networks:
+      - backend
+    restart: unless-stopped
+
+  order-service:
+    build:
+      context: .
+      dockerfile: order-service/Dockerfile
+    container_name: order-service
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/order_db
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka:eureka123@eureka-service:8761/eureka/
+    depends_on:
+      postgres:
+        condition: service_healthy
+      eureka-service:
+        condition: service_started
+      kafka:
+        condition: service_started
+    networks:
+      - backend
+    restart: unless-stopped
+
+  inventory-service:
+    build:
+      context: .
+      dockerfile: inventory-service/Dockerfile
+    container_name: inventory-service
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/inventory_db
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+      SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SPRING_DATA_REDIS_HOST: redis
+      EUREKA_CLIENT_SERVICEURL_DEFAULTZONE: http://eureka:eureka123@eureka-service:8761/eureka/
+    depends_on:
+      postgres:
+        condition: service_healthy
+      eureka-service:
+        condition: service_started
+      kafka:
+        condition: service_started
+      redis:
+        condition: service_started
+    networks:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  kafka_data:
+  redis_data:
+
+networks:
+  backend:
+    driver: bridge
