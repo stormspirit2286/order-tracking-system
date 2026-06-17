@@ -1,0 +1,62 @@
+name: Build and Push to ECR
+
+on:
+  push:
+    branches: [ main ]
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REGISTRY: 029727239053.dkr.ecr.ap-southeast-1.amazonaws.com
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push eureka-service
+        run: |
+          docker build -f eureka-service/Dockerfile -t $ECR_REGISTRY/order-tracking/eureka-service:latest -t $ECR_REGISTRY/order-tracking/eureka-service:${{ github.sha }} .
+          docker push $ECR_REGISTRY/order-tracking/eureka-service --all-tags
+
+      - name: Build and push config-service
+        run: |
+          docker build -f config-service/Dockerfile -t $ECR_REGISTRY/order-tracking/config-service:latest -t $ECR_REGISTRY/order-tracking/config-service:${{ github.sha }} .
+          docker push $ECR_REGISTRY/order-tracking/config-service --all-tags
+
+      - name: Build and push api-gateway
+        run: |
+          docker build -f api-gateway/Dockerfile -t $ECR_REGISTRY/order-tracking/api-gateway:latest -t $ECR_REGISTRY/order-tracking/api-gateway:${{ github.sha }} .
+          docker push $ECR_REGISTRY/order-tracking/api-gateway --all-tags
+
+      - name: Build and push identity-service
+        run: |
+          docker build -f identity-service/Dockerfile -t $ECR_REGISTRY/order-tracking/identity-service:latest -t $ECR_REGISTRY/order-tracking/identity-service:${{ github.sha }} .
+          docker push $ECR_REGISTRY/order-tracking/identity-service --all-tags
+
+      - name: Build and push product-service
+        run: |
+          docker build -f product-service/Dockerfile -t $ECR_REGISTRY/order-tracking/product-service:latest -t $ECR_REGISTRY/order-tracking/product-service:${{ github.sha }} .
+          docker push $ECR_REGISTRY/order-tracking/product-service --all-tags
+
+      - name: Build and push order-service
+        run: |
+          docker build -f order-service/Dockerfile -t $ECR_REGISTRY/order-tracking/order-service:latest -t $ECR_REGISTRY/order-tracking/order-service:${{ github.sha }} .
+          docker push $ECR_REGISTRY/order-tracking/order-service --all-tags
+
+      - name: Build and push inventory-service
+        run: |
+          docker build -f inventory-service/Dockerfile -t $ECR_REGISTRY/order-tracking/inventory-service:latest -t $ECR_REGISTRY/order-tracking/inventory-service:${{ github.sha }} .
+          docker push $ECR_REGISTRY/order-tracking/inventory-service --all-tags
